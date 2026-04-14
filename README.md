@@ -28,7 +28,7 @@
 
 ```bash
 # 克隆
-git clone https://github.com/yourname/eco-acquire.git
+git clone https://github.com/ww11-max/AI-FOR-ECONOMIST.git
 cd eco-acquire
 
 # 安装依赖

@@ -114,6 +114,9 @@ def main():
                 download=not args.no_download,
                 extract_conclusion=not args.no_conclusion,
                 connect_port=args.connect,
+                global_journal=args.journal,
+                global_year_start=args.year_start,
+                global_year_end=args.year_end,
             )
 
             print(f"\n{'='*60}")

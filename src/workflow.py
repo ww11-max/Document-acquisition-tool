@@ -44,7 +44,10 @@ class EcoAcquireWorkflow:
     def run_batch(self, batch_file: str,
                   download: bool = True,
                   extract_conclusion: bool = True,
-                  connect_port: int = None) -> Dict:
+                  connect_port: int = None,
+                  global_journal: str = None,
+                  global_year_start: int = None,
+                  global_year_end: int = None) -> Dict:
         """
         执行 AI Planning 模式：读取结构化文献清单，逐条搜索、下载、提取结论。
 
@@ -58,6 +61,9 @@ class EcoAcquireWorkflow:
             download: 是否下载 PDF
             extract_conclusion: 是否提取结论
             connect_port: 浏览器连接端口（--connect 模式）
+            global_journal: 全局期刊过滤（来自 CLI --journal）
+            global_year_start: 全局起始年份（来自 CLI --year-start）
+            global_year_end: 全局结束年份（来自 CLI --year-end）
 
         Returns:
             完整任务报告 dict
@@ -120,6 +126,9 @@ class EcoAcquireWorkflow:
                     paper_result = self._execute_single_paper(
                         crawler, paper, pdf_dir,
                         download, extract_conclusion,
+                        global_journal=global_journal,
+                        global_year_start=global_year_start,
+                        global_year_end=global_year_end,
                     )
 
                     report["papers"].append(paper_result)
@@ -174,7 +183,10 @@ class EcoAcquireWorkflow:
         return report
 
     def _execute_single_paper(self, crawler, paper: Dict, pdf_dir: Path,
-                               download: bool, extract_conclusion: bool) -> Dict:
+                               download: bool, extract_conclusion: bool,
+                               global_journal: str = None,
+                               global_year_start: int = None,
+                               global_year_end: int = None) -> Dict:
         """
         执行单篇文献的搜索+下载。
 
@@ -185,6 +197,8 @@ class EcoAcquireWorkflow:
           - journal_browse  → search_by_journal(journal, year)
           - keyword         → search_by_keywords([keyword])
           - doi             → 直接尝试下载（如果 DOI 可用）
+
+        global_journal/year_start/year_end 来自 CLI 参数，优先级低于 paper 字段。
         """
         title = paper.get("title", "")
         authors = paper.get("authors", [])
@@ -234,10 +248,22 @@ class EcoAcquireWorkflow:
 
             elif strategy == "keyword":
                 kw = [search_text] if isinstance(search_text, str) else search_text
+                # 使用 paper 字段优先，回退到 CLI 全局参数
+                kw_journal = journal or global_journal or ""
+                kw_year_s = year if year and year > 0 else global_year_start
+                kw_year_e = year if year and year > 0 else global_year_end
+                # 从搜索词中移除期刊名（避免重复过滤导致搜不到）
+                if kw_journal:
+                    kw = [k.replace(kw_journal, "").strip() for k in kw]
+                    kw = [k for k in kw if k]  # 移除空字符串
+                if not kw:
+                    result["status"] = "error"
+                    result["message"] = "搜索词为空（可能被期刊名清理后无剩余关键词）"
+                    return result
                 articles = crawler.search_by_keywords(
-                    kw, max_results=5,
-                    journal_filter=journal or "",
-                    year_start=year, year_end=year,
+                    kw, max_results=20,  # keyword 策略给更多结果供 AI 筛选
+                    journal_filter=kw_journal,
+                    year_start=kw_year_s, year_end=kw_year_e,
                 )
 
             else:
@@ -255,7 +281,16 @@ class EcoAcquireWorkflow:
                 result["message"] = f"搜索返回空结果 (策略: {strategy})"
                 return result
 
-            # ---- 客户端相似度匹配 ----
+            if strategy == "keyword":
+                # keyword 策略：直接返回所有搜索结果，不做模糊匹配
+                result["status"] = "found"
+                result["article"] = articles[0]  # 存储第一条作为代表
+                result["match_score"] = 1.0
+                result["all_results"] = articles  # 存储全部结果
+                result["total_results"] = len(articles)
+                return result
+
+            # ---- 非keyword策略：客户端相似度匹配 ----
             best_match = self._find_best_match(
                 articles, title=title,
                 authors=authors, journal=journal, year=year,

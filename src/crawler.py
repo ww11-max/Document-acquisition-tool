@@ -371,29 +371,38 @@ class CNKICrawler:
         return f"{settings.CNKI_SEARCH_URL}?kw={quote_plus(keyword)}&korder={korder}"
 
     def _execute_expert_search(self, conditions: List[str],
-                                max_results: int) -> List[Dict]:
+                                max_results: int,
+                                journal_filter: str = "",
+                                year_start: int = None,
+                                year_end: int = None) -> List[Dict]:
         """
-        通过CNKI普通搜索框输入检索式执行搜索。
-        如果检索式包含多个AND条件，拆分后仅用第一个条件做普通搜索，
-        然后通过客户端过滤精确匹配。
+        通过CNKI专业检索入口执行多条件检索。
+
+        使用 CNKI 的专业检索页面输入完整检索式（如 SU="关键词" AND LY="期刊"），
+        比普通搜索框 + 页面筛选器更可靠。
         """
         if not conditions:
             return []
 
-        # 取第一个条件作为搜索关键词（普通搜索框只接受单个输入）
-        first_cond = conditions[0]
-        # 提取引号内的内容
-        m = re.search(r'"(.+?)"', first_cond)
-        search_text = m.group(1) if m else first_cond
-        search_text = search_text.replace('TI=', '').replace('SU=', '').replace('AU=', '').replace('LY=', '').replace('PY=', '')
+        # 构建完整检索式
+        all_conditions = list(conditions)
+        if journal_filter:
+            all_conditions.append(f'LY="{journal_filter}"')
+        if year_start and year_end:
+            all_conditions.append(f'PY="{year_start}-{year_end}"')
+        elif year_start:
+            all_conditions.append(f'PY="{year_start}-{datetime.now().year}"')
+        elif year_end:
+            all_conditions.append(f'PY="1900-{year_end}"')
 
-        logger.info(f"普通搜索（提取条件）: {search_text}")
+        full_query = " AND ".join(all_conditions)
+        logger.info(f"专业检索式: {full_query}")
 
         try:
-            # 用普通搜索URL
-            search_url = self._build_search_url(search_text)
+            # CNKI 专业检索入口
+            expert_url = "https://kns.cnki.net/kns8s/AdvSearch?classid=YSTT4HG0"
             self.driver.set_page_load_timeout(20)
-            self.driver.get(search_url)
+            self.driver.get(expert_url)
 
             try:
                 WebDriverWait(self.driver, 15).until(
@@ -401,6 +410,41 @@ class CNKICrawler:
                 )
             except Exception:
                 pass
+
+            # 在专业检索输入框中输入检索式
+            try:
+                textarea = WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR,
+                        "#expert-input, .expert-search-input, textarea[name='expertvalue'], #gradetxt"))
+                )
+                textarea.clear()
+                # 使用 JS 设置值（更可靠）
+                self.driver.execute_script(
+                    "arguments[0].value = arguments[1];", textarea, full_query
+                )
+                time.sleep(0.5)
+
+                # 点击检索按钮
+                search_btn = self.driver.find_element(
+                    By.CSS_SELECTOR,
+                    "#expert-search-btn, .btn-search, input.btn-search, button.search-btn"
+                )
+                search_btn.click()
+            except Exception as e:
+                logger.warning(f"专业检索输入失败，回退到普通搜索: {e}")
+                # 回退：用第一个条件做普通搜索
+                first_cond = all_conditions[0]
+                m = re.search(r'"(.+?)"', first_cond)
+                search_text = m.group(1) if m else first_cond
+                search_text = search_text.replace('TI=', '').replace('SU=', '').replace('AU=', '').replace('LY=', '').replace('PY=', '')
+                search_url = self._build_search_url(search_text)
+                self.driver.get(search_url)
+                try:
+                    WebDriverWait(self.driver, 15).until(
+                        lambda d: d.execute_script("return document.readyState") == "complete"
+                    )
+                except Exception:
+                    pass
 
             # 等待搜索结果
             try:
@@ -447,32 +491,47 @@ class CNKICrawler:
                                 year_start: int = None,
                                 year_end: int = None,
                                 sort_by: str = "relevance") -> List[Dict]:
-        """搜索单个关键词，支持年份和作者筛选"""
+        """搜索单个关键词，支持年份和作者筛选
 
+        当有筛选条件时，使用 CNKI 高级检索 URL 组合多个条件，
+        而非普通搜索框 + 客户端过滤（后者容易丢结果）。
+        """
         has_filters = any([journal_filter, author_filter,
                            year_start is not None, year_end is not None])
 
         if has_filters:
-            # 有筛选条件 → 用专业检索式在搜索框输入
+            # ---- 构造检索条件，分离搜索词和筛选条件 ----
             conditions = []
             if keyword:
                 conditions.append(f'SU="{keyword}"')
             if author_filter:
                 conditions.append(f'AU="{author_filter}"')
-            if journal_filter:
-                conditions.append(f'LY="{journal_filter}"')
-            if year_start and year_end:
-                conditions.append(f'PY="{year_start}-{year_end}"')
-            elif year_start:
-                conditions.append(f'PY="{year_start}-{datetime.now().year}"')
-            elif year_end:
-                conditions.append(f'PY="1900-{year_end}"')
+            # journal 和 year 不再塞进 conditions，改用页面筛选器
 
-            results = self._execute_expert_search(conditions, max_results)
+            query_parts = conditions + []
+            if journal_filter:
+                query_parts.append(f'LY="{journal_filter}"')
+            if year_start and year_end:
+                query_parts.append(f'PY="{year_start}-{year_end}"')
+            elif year_start:
+                query_parts.append(f'PY="{year_start}-{datetime.now().year}"')
+            elif year_end:
+                query_parts.append(f'PY="1900-{year_end}"')
+
+            logger.info(f"检索条件: {' AND '.join(query_parts)}")
+
+            results = self._execute_expert_search(
+                conditions, max_results,
+                journal_filter=journal_filter,
+                year_start=year_start, year_end=year_end,
+            )
 
             # 客户端二次过滤兜底
+            # keyword 搜索场景：只过滤年份和作者，不过滤期刊
+            # （期刊筛选由 CNKI 页面/专业检索处理，客户端 journal 过滤容易误杀）
             results = self._client_side_filter(
-                results, author=author_filter, journal=journal_filter,
+                results, author=author_filter,
+                journal="",  # 不做期刊客户端过滤
                 year_start=year_start, year_end=year_end
             )
             return results[:max_results]
