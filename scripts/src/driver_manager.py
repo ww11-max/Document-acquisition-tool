@@ -1,7 +1,16 @@
 """
-跨浏览器驱动管理器
-自动检测系统已安装的浏览器（Chrome > Edge > Firefox），
-利用 Selenium 4 内置 Selenium Manager 自动下载匹配驱动。
+跨浏览器驱动管理器 — 零配置版
+=================================
+两种模式：
+  1. Profile 模式（默认）：自动启动浏览器 + 持久化用户数据目录
+     一次登录，永久复用。无需手动启动调试端口。
+  2. Connect 模式（兼容）：连接已有调试端口浏览器（--connect PORT）
+
+核心功能：
+  - 自动检测系统浏览器（Chrome > Edge > Firefox）
+  - 利用 Selenium 4 Selenium Manager 自动下载匹配驱动
+  - 专用 user-data-dir 持久化登录态
+  - setup_login() 交互式登录流程
 """
 
 import os
@@ -28,6 +37,7 @@ logger = logging.getLogger(__name__)
 # 平台检测
 # ============================================================
 _PLATFORM = sys.platform  # "win32", "darwin", "linux"
+
 
 # ============================================================
 # 浏览器自动检测（跨平台）
@@ -82,6 +92,7 @@ def _get_browser_paths() -> dict:
 
     return paths
 
+
 _BROWSER_PATHS = _get_browser_paths()
 
 # 各浏览器的 User-Agent 模板（跨平台）
@@ -127,7 +138,7 @@ def auto_detect_browser(preferred: str = None) -> str:
     优先级：用户指定 > Chrome > Edge > Firefox
 
     Args:
-        preferred: 用户在.env中指定的浏览器
+        preferred: 用户指定的浏览器
 
     Returns:
         浏览器名称 'chrome' / 'edge' / 'firefox'
@@ -163,29 +174,35 @@ def auto_detect_browser(preferred: str = None) -> str:
 
 class BrowserManager:
     """
-    跨浏览器驱动管理器。
-    自动检测系统浏览器，利用 Selenium 4 Selenium Manager 自动下载驱动。
+    跨浏览器驱动管理器 — 零配置版。
+
+    默认使用 Profile 模式：自动启动浏览器 + 持久化用户数据目录。
+    一次登录，永久复用，无需手动启动调试端口。
+
+    兼容 Connect 模式：连接已有调试端口浏览器。
     """
 
     def __init__(self, headless: bool = None, download_dir: str = None,
-                 browser: str = None, connect_port: int = None):
+                 browser: str = None, connect_port: int = None,
+                 use_profile: bool = True):
         self.headless = headless if headless is not None else settings.USE_HEADLESS
         self.download_dir = download_dir or str(settings.OUTPUTS_DIR)
         self.driver = None
-        self.connect_port = connect_port  # 连接已有浏览器的调试端口
+        self.connect_port = connect_port
+        self.use_profile = use_profile and not bool(connect_port)
 
         # 确定浏览器
         env_browser = os.getenv("BROWSER", "").strip().lower()
-        self.browser = browser or env_browser or None  # None 表示自动检测
+        self.browser = browser or env_browser or None
 
         # 连接模式不需要检测浏览器
         if connect_port:
-            self.browser_name = "edge"  # 默认，实际由连接决定
+            self.browser_name = "edge"
         else:
             self.browser_name = auto_detect_browser(self.browser)
 
     def create_driver(self):
-        """创建并配置 WebDriver（含反检测）"""
+        """创建并配置 WebDriver"""
         # 连接模式：复用用户已打开的浏览器
         if self.connect_port:
             self._connect_existing(self.connect_port)
@@ -206,22 +223,192 @@ class BrowserManager:
         self.driver = driver
         return driver
 
+    # ============================================================
+    # 交互式登录流程（零配置核心）
+    # ============================================================
+
+    def setup_login(self, timeout: int = 300) -> bool:
+        """
+        交互式登录流程。
+
+        1. 启动浏览器（带 profile，非 headless）
+        2. 打开 CNKI 搜索页面
+        3. 检测是否需要登录 / 验证
+        4. 提示用户在浏览器中手动完成登录
+        5. 等待登录完成或超时
+        6. 浏览器保持打开，profile 自动保存登录态
+
+        之后再次运行搜索时，cookie 自动复用，无需再次登录。
+
+        Args:
+            timeout: 等待用户登录的超时秒数（默认 5 分钟）
+
+        Returns:
+            True 表示登录成功/已登录，False 表示超时
+        """
+        logger.info("=" * 50)
+        logger.info("  交互式登录流程")
+        logger.info("=" * 50)
+
+        # 确认非 headless 模式
+        if self.headless:
+            logger.warning("登录流程需要可视化界面，已自动关闭 headless 模式")
+            self.headless = False
+
+        # 重新创建 driver（非 headless）
+        if self.driver:
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
+
+        self.driver = self._create_driver_for_login()
+
+        print("\n" + "=" * 60)
+        print("  🚀 浏览器已启动，正在打开 CNKI 知网...")
+        print("  📌 请在浏览器中完成以下操作：")
+        print("     1. 等待 CNKI 页面加载")
+        print("     2. 如果看到登录按钮，点击「登录」→「机构登录」或「IP登录」")
+        print("     3. 完成人机验证（如有）")
+        print("     4. 看到搜索框即表示登录成功")
+        print(f"  ⏰ 等待超时：{timeout} 秒")
+        print("=" * 60 + "\n")
+
+        try:
+            # 打开 CNKI
+            self.driver.get(settings.CNKI_SEARCH_URL)
+            time.sleep(3)
+
+            # 检测当前状态
+            already_logged_in = self._check_login_status()
+
+            if already_logged_in:
+                print("\n  ✅ 已检测到登录状态（profile 中有有效 cookie），无需重新登录！\n")
+                return True
+
+            # 等待用户手动登录
+            print("  🔍 检测到需要登录，请在上方浏览器中手动操作...\n")
+
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                time.sleep(3)
+
+                # 检查是否已登录成功
+                if self._check_login_status():
+                    elapsed = int(time.time() - start_time)
+                    print(f"\n  ✅ 登录成功！（耗时 {elapsed} 秒）")
+                    print("  💾 登录状态已保存到浏览器 profile，下次无需重新登录\n")
+                    return True
+
+                # 每 30 秒提示一次
+                elapsed = int(time.time() - start_time)
+                if elapsed % 30 < 3 and elapsed > 0:
+                    remaining = timeout - elapsed
+                    print(f"  ⏳ 等待中... 已等待 {elapsed} 秒，剩余 {remaining} 秒")
+
+            print(f"\n  ⚠️ 登录超时（{timeout} 秒），请稍后重试\n")
+            return False
+
+        except Exception as e:
+            logger.error(f"登录流程异常: {e}")
+            return False
+
+    def _create_driver_for_login(self):
+        """为登录流程创建带可视化界面的 driver"""
+        if self.browser_name == "chrome":
+            options = ChromeOptions()
+        elif self.browser_name == "firefox":
+            options = FirefoxOptions()
+        else:
+            options = EdgeOptions()
+
+        # 不 headless
+        self._apply_common_options(options)
+        self._apply_chromium_prefs(options)
+        self._apply_random_ua(options, self.browser_name)
+
+        # 核心：使用持久化用户数据目录
+        profile_dir = str(settings.USER_DATA_DIR)
+        options.add_argument(f"--user-data-dir={profile_dir}")
+
+        # 禁用首次运行向导
+        options.add_argument("--no-first-run")
+        options.add_argument("--no-default-browser-check")
+        options.add_argument("--disable-session-crashed-bubble")
+
+        if self.browser_name == "chrome":
+            driver = webdriver.Chrome(options=options)
+        elif self.browser_name == "firefox":
+            driver = webdriver.Firefox(options=options)
+        else:
+            driver = webdriver.Edge(options=options)
+
+        self._execute_anti_detection(driver)
+        return driver
+
+    def _check_login_status(self) -> bool:
+        """
+        检测 CNKI 是否已登录。
+
+        判断标准：
+          1. 页面上有搜索输入框
+          2. 没有"请登录"或验证码弹窗
+          3. 页面正常加载（非错误页）
+        """
+        try:
+            page_source = self.driver.page_source.lower()
+
+            # 排除错误页面
+            error_keywords = ["403", "404", "502", "503", "service unavailable",
+                              "bad gateway", "gateway timeout", "err_connection"]
+            for kw in error_keywords:
+                if kw in page_source:
+                    return False
+
+            # 排除验证码页面
+            captcha_keywords = ["验证码", "captcha", "请输入验证", "滑动验证",
+                               "点击验证", "图片验证", "滑块验证"]
+            for kw in captcha_keywords:
+                if kw in page_source:
+                    return False
+
+            # 检查是否有搜索框（页面正常加载的标志）
+            try:
+                search_input = self.driver.find_element(
+                    By.CSS_SELECTOR,
+                    "input.search-input, input#txt_SearchText, input[placeholder*='检索'], input[placeholder*='搜索']"
+                )
+                return search_input.is_displayed()
+            except Exception:
+                pass
+
+            # 宽松检查：页面包含 CNKI 特征关键词
+            cnki_indicators = ["kns8s", "检索", "高级检索", "选择数据库"]
+            for indicator in cnki_indicators:
+                if indicator in page_source:
+                    return True
+
+            return False
+
+        except Exception:
+            return False
+
+    # ============================================================
+    # 连接已有浏览器（兼容模式）
+    # ============================================================
+
     def _connect_existing(self, port: int):
         """
         连接到用户已打开的浏览器实例（通过远程调试端口）。
 
         用户需先启动浏览器时加 --remote-debugging-port 参数，例如：
           msedge --remote-debugging-port=9222
-
-        这样 skill 直接复用用户的登录态、cookies、session，
-        不会触发验证码等反爬机制。
         """
         debugger_url = f"http://127.0.0.1:{port}"
-        debugger_addr = f"127.0.0.1:{port}"  # Selenium debuggerAddress 只接受 host:port
+        debugger_addr = f"127.0.0.1:{port}"
 
         try:
             # 先探测调试端口是否可用
-            import urllib.request
             req = urllib.request.Request(f"{debugger_url}/json/version", method="GET")
             with urllib.request.urlopen(req, timeout=3) as resp:
                 info = json.loads(resp.read().decode())
@@ -237,11 +424,10 @@ class BrowserManager:
             elif "firefox" in user_agent:
                 self.browser_name = "firefox"
             else:
-                self.browser_name = "edge"  # 默认
+                self.browser_name = "edge"
 
             logger.info(f"检测到已有浏览器: {self.browser_name} ({browser_name})")
 
-            # 用对应浏览器类型连接
             if self.browser_name == "edge":
                 options = EdgeOptions()
                 options.add_experimental_option("debuggerAddress", debugger_addr)
@@ -251,9 +437,7 @@ class BrowserManager:
                 options.add_experimental_option("debuggerAddress", debugger_addr)
                 self.driver = webdriver.Chrome(options=options)
             elif self.browser_name == "firefox":
-                # Firefox 用不同的连接方式
                 options = FirefoxOptions()
-                # Firefox 暂不支持 debuggerAddress，给出提示
                 logger.warning("Firefox 不支持远程调试连接，请使用 Chrome 或 Edge")
                 raise RuntimeError("Firefox 不支持 --connect 模式，请使用 Chrome 或 Edge")
 
@@ -276,7 +460,6 @@ class BrowserManager:
         """关闭驱动"""
         if self.driver:
             try:
-                # 连接模式下不关闭用户的浏览器，只断开
                 if self.connect_port:
                     self.driver.quit()
                     logger.info(f"已断开与 {self.browser_name} 的连接（浏览器未关闭）")
@@ -303,7 +486,15 @@ class BrowserManager:
         self._apply_common_options(options)
         self._apply_chromium_prefs(options)
         self._apply_random_ua(options, "chrome")
-        # Selenium 4 自动管理驱动，无需指定 Service 路径
+
+        # 使用持久化用户数据目录（零配置核心）
+        if self.use_profile:
+            profile_dir = str(settings.USER_DATA_DIR)
+            options.add_argument(f"--user-data-dir={profile_dir}")
+            options.add_argument("--no-first-run")
+            options.add_argument("--no-default-browser-check")
+            options.add_argument("--disable-session-crashed-bubble")
+
         return webdriver.Chrome(options=options)
 
     # ============================================================
@@ -314,6 +505,15 @@ class BrowserManager:
         self._apply_common_options(options)
         self._apply_chromium_prefs(options)
         self._apply_random_ua(options, "edge")
+
+        # 使用持久化用户数据目录
+        if self.use_profile:
+            profile_dir = str(settings.USER_DATA_DIR)
+            options.add_argument(f"--user-data-dir={profile_dir}")
+            options.add_argument("--no-first-run")
+            options.add_argument("--no-default-browser-check")
+            options.add_argument("--disable-session-crashed-bubble")
+
         return webdriver.Edge(options=options)
 
     # ============================================================
@@ -329,7 +529,7 @@ class BrowserManager:
         options.set_preference("dom.webdriver.enabled", False)
         options.set_preference("useAutomationExtension", False)
 
-        # UA（根据平台选择对应模板）
+        # UA
         ua_templates = _UA_TEMPLATES.get("firefox", {})
         ua = ua_templates.get(_PLATFORM, ua_templates.get("win32", ""))
         if ua:
@@ -345,6 +545,14 @@ class BrowserManager:
 
         # 禁用自动化提示
         options.set_preference("dom.webnotifications.enabled", False)
+
+        # 使用持久化用户数据目录
+        if self.use_profile:
+            profile_dir = str(settings.USER_DATA_DIR)
+            # Firefox 使用 profile 参数
+            from selenium.webdriver.firefox.firefox_profile import FirefoxProfile
+            profile = FirefoxProfile(profile_dir)
+            return webdriver.Firefox(options=options, firefox_profile=profile)
 
         return webdriver.Firefox(options=options)
 
@@ -366,7 +574,7 @@ class BrowserManager:
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
 
-        # SSL 证书：默认不禁用，用户可通过 UNSAFE_SSL=true 启用
+        # SSL 证书
         if settings.UNSAFE_SSL:
             options.add_argument("--ignore-certificate-errors")
             options.add_argument("--allow-insecure-localhost")
@@ -388,7 +596,7 @@ class BrowserManager:
         options.add_experimental_option("prefs", prefs)
 
     def _apply_random_ua(self, options, browser: str):
-        """随机 User-Agent（根据当前平台选择对应模板）"""
+        """随机 User-Agent"""
         templates = _UA_TEMPLATES.get(browser, {})
         ua_template = templates.get(_PLATFORM, templates.get("win32", ""))
         if ua_template:
@@ -402,7 +610,6 @@ class BrowserManager:
     def _execute_anti_detection(self, driver):
         """注入反检测 JS 脚本"""
         if self.browser_name == "firefox":
-            # Firefox 用 CDP 方式注入
             try:
                 driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
                     "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
@@ -411,8 +618,6 @@ class BrowserManager:
                 pass
             return
 
-        # Chromium 内核脚本
-        # 动态设置 platform（匹配当前操作系统）
         _platform_str = {"win32": "Win32", "darwin": "MacIntel", "linux": "Linux x86_64"}.get(
             _PLATFORM, "Win32"
         )

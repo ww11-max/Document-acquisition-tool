@@ -41,6 +41,7 @@ DATA_DIR = Path(os.getenv("ECO_ACQUIRE_HOME", Path.home() / "eco-acquire")).reso
 OUTPUTS_DIR = DATA_DIR / "outputs"
 LOGS_DIR = DATA_DIR / "logs"
 CONFIG_DIR = DATA_DIR / "config"
+USER_DATA_DIR = DATA_DIR / "browser_profile"   # 浏览器用户数据目录（持久化登录态）
 
 # ============================================================
 # 浏览器配置
@@ -51,7 +52,12 @@ DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 UNSAFE_SSL = os.getenv("UNSAFE_SSL", "false").lower() == "true"
 
 # ============================================================
-# 目标经济学期刊列表
+# 常用经济学期刊参考列表（非检索限制！）
+# 此列表仅用于：
+#   1. journal_browse 策略：按 ISSN 精确检索整本期刊
+#   2. --list-journals：展示常用期刊名和 ISSN
+# 用户指定任意期刊名均可直接检索，不受此列表限制。
+# keyword 策略不传 journal 参数即可搜索全部期刊。
 # ============================================================
 TARGET_JOURNALS = {
     "经济研究": {
@@ -161,7 +167,7 @@ def ensure_dirs() -> list:
         可用目录列表；如果写入失败返回信息。
     """
     dirs_info = []
-    for d in [DATA_DIR, OUTPUTS_DIR, LOGS_DIR, CONFIG_DIR]:
+    for d in [DATA_DIR, OUTPUTS_DIR, LOGS_DIR, CONFIG_DIR, USER_DATA_DIR]:
         try:
             d.mkdir(parents=True, exist_ok=True)
             # 验证写入权限

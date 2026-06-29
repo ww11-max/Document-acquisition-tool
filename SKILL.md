@@ -1,8 +1,9 @@
 ---
+name: eco-acquire
 description: "经济学文献题录检索、CNKI知网文献搜索、期刊文献元数据获取、文献摘要提取、经济学核心期刊检索、知网文献查找、学术文献搜索、文献题录导出、文献综述辅助工具、帮我找文献、搜索论文、查找期刊文章、文献检索工具、写文献综述"
 ---
 
-# Skill: eco-acquire
+# Skill: eco-acquire（零配置版）
 
 ## 概述
 
@@ -10,7 +11,9 @@ eco-acquire 是一个**经济学文献题录检索工具**，从 CNKI（知网�
 
 **不下载全文 PDF**，专注于快速、稳定的题录信息获取。
 
-**核心能力**：用户自然语言 → AI 分析生成检索计划 → 自动检索 → 题录报告
+**零配置设计**：首次运行 `--setup` 完成登录后，浏览器 cookie 自动保存。后续使用无需任何手动操作，无需启动调试端口，无需输入密码。
+
+**核心能力**：用户自然语言 → AI 分析生成检索计划 → 自动检索 → 题录报告。**不限制期刊范围**，CNKI 所有可检索期刊均可搜索。
 
 ---
 
@@ -30,6 +33,7 @@ eco-acquire 是一个**经济学文献题录检索工具**，从 CNKI（知网�
    - 具体文献标题（如有）
 
 2. **确定检索策略**：
+
    | 用户意图 | strategy | 说明 |
    |---------|----------|------|
    | 主题/关键词广泛搜索 | `keyword` | 找多篇文章 |
@@ -47,6 +51,12 @@ eco-acquire 是一个**经济学文献题录检索工具**，从 CNKI（知网�
 
 ### 第二阶段：执行检索
 
+**零配置模式（默认，推荐）**：
+```bash
+python run.py --batch /path/to/search_plan.json
+```
+
+**兼容模式（连接已有浏览器）**：
 ```bash
 python run.py --batch /path/to/search_plan.json --connect 9222
 ```
@@ -97,15 +107,30 @@ python run.py --batch /path/to/search_plan.json --connect 9222
 
 ---
 
-## 前置条件
+## 前置条件（仅需一次）
 
-用户需先启动带调试端口的浏览器：
+**首次使用**：运行一次登录设置，后续永久免配：
 
+```bash
+python run.py --setup
 ```
-msedge --remote-debugging-port=9222
+
+这会：
+1. 自动检测系统浏览器（Edge / Chrome / Firefox）
+2. 打开 CNKI 知网搜索页面
+3. 提示你在此浏览器中完成登录（机构登录/IP登录）
+4. 登录状态自动保存到 `~/eco-acquire/browser_profile/`
+5. 后续使用自动复用 cookie，无需任何操作
+
+**如果登录超时**，可延长超时时间：
+```bash
+python run.py --setup --setup-timeout 600
 ```
 
-工具会复用用户的浏览器登录态，不会触发验证码。
+**如果想不登录直接搜索**（CNKI 可能触发验证码），使用 `--no-profile`：
+```bash
+python run.py --keywords "数字经济" --no-profile
+```
 
 ---
 
@@ -116,46 +141,69 @@ msedge --remote-debugging-port=9222
 ```
 outputs/
 └── MM-DD-任务名/
-    ├── task_report.json      # 完整任务报告
+    ├── task_report.json          # 完整任务报告
     └── report/
-        ├── *_results.md      # 题录表格 + 摘要详览
-        ├── *_results.csv     # CSV 格式数据
-        └── *_articles.json   # 原始 JSON 数据
+        ├── *_results.xlsx        # Excel 结构化表格（带样式、冻结窗格、自动筛选）
+        ├── *_results.csv         # CSV 逗号分隔格式
+        ├── *_results.md          # Markdown 完整题录表格 + 摘要详览
+        └── *_articles.json       # 原始 JSON 数据
 ```
+
+**Excel 表格特性**：
+- 蓝色表头 + 白色字体，隔行交替底色
+- 冻结首行，自动筛选已开启
+- 各列预置合理宽度（标题 50、摘要 60、关键词 30 等）
+- 单元格自动换行，适合在 Excel 中直接浏览、筛选、排序
+
+**Markdown 表格特性**：
+- 完整字段不截断，含 DOI 可点击链接
+- 摘要详览区包含作者、期刊、DOI、关键词、原文链接、完整摘要
 
 ---
 
 ## 支持的期刊
 
-在CNKI中国知网开放获取的期刊文献
+CNKI 中国知网开放获取的所有期刊文献均可检索，无期刊限制。内置的常用经济学期刊列表（见 `config/settings.py` 中的 `TARGET_JOURNALS`）仅作为期刊名和 ISSN 的参考映射，**不是检索限制**。用户指定任意期刊名均可直接检索。
 
 ---
 
 ## 示例
 
-### 示例1：主题搜索
+### 示例 1：首次设置
 
-用户："找2022-2025年世界经济期刊上关于自贸试验区与企业创新的文献"
+```bash
+python run.py --setup
+```
+
+### 示例 2：主题搜索
+
+用户："找2022-2025年关于自贸试验区与企业创新的文献"
 
 AI 生成：
 ```json
 {
-  "task_name": "世界经济-自贸试验区与企业创新",
+  "task_name": "自贸试验区与企业创新",
   "papers": [
     {
-      "title": "自贸试验区与企业创新",
       "strategy": "keyword",
       "search_text": "自贸试验区 企业创新",
-      "journal": "世界经济",
       "notes": "2022-2025年"
     }
   ]
 }
 ```
 
-执行：`python run.py --batch plan.json --connect 9222 --year-start 2022 --year-end 2025`
+执行（不指定期刊即搜索全部期刊）：
+```bash
+python run.py --batch plan.json --year-start 2022 --year-end 2025
+```
 
-### 示例2：精确搜索特定文献
+也可指定期刊缩小范围：
+```bash
+python run.py --batch plan.json --journal "经济研究" --year-start 2022 --year-end 2025
+```
+
+### 示例 3：精确搜索特定文献
 
 用户："帮我找赵涛2020年发在《中国工业经济》上关于数字经济的那篇"
 
@@ -176,16 +224,45 @@ AI 生成：
 }
 ```
 
-执行：`python run.py --batch plan.json --connect 9222`
+执行：
+```bash
+python run.py --batch plan.json
+```
 
-### 示例3：直接命令行搜索
+### 示例 4：直接命令行搜索
 
 ```bash
+# 零配置模式（默认）
+python run.py --keywords "绿色金融" --journal "金融研究" --year-start 2023
+
+# 兼容模式（连接已有浏览器）
 python run.py --keywords "绿色金融" --journal "金融研究" --year-start 2023 --connect 9222
 ```
 
 ---
 
+## 命令行参数速查
+
+| 参数 | 说明 |
+|------|------|
+| `--setup` | 首次使用：交互式登录，登录态永久保存 |
+| `--keywords "词1" "词2"` | 搜索关键词 |
+| `--journal "期刊名"` | 限定期刊 |
+| `--author "姓名"` | 按作者筛选 |
+| `--exact-title "标题"` | 精确标题搜索 |
+| `--year-start YYYY` | 起始年份 |
+| `--year-end YYYY` | 结束年份 |
+| `--max-results N` | 最大结果数（默认20） |
+| `--batch FILE.json` | AI Planning 模式 |
+| `--no-abstract` | 跳过摘要提取（更快） |
+| `--headless` | 无头浏览器模式 |
+| `--no-profile` | 不保存登录态 |
+| `--connect PORT` | 兼容模式：连接已有浏览器 |
+| `--list-journals` | 列出支持的期刊 |
+| `--browser edge/chrome` | 指定浏览器 |
+
+---
+
 ## 版本
 
-v3.0.0 — 纯题录检索模式，移除 PDF 下载
+v3.1.0 — 零配置版：Profile 持久化登录态，移除手动启动调试端口依赖

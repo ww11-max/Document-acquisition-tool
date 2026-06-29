@@ -27,11 +27,13 @@ class CNKICrawler:
     """知网文献爬虫"""
 
     def __init__(self, headless: Optional[bool] = None, download_dir: Optional[str] = None,
-                 browser: Optional[str] = None, connect_port: Optional[int] = None):
+                 browser: Optional[str] = None, connect_port: Optional[int] = None,
+                 use_profile: bool = True):
         self.headless = headless if headless is not None else settings.USE_HEADLESS
         self.download_dir = download_dir or str(settings.OUTPUTS_DIR)
         self.browser = browser
         self.connect_port = connect_port
+        self.use_profile = use_profile and not bool(connect_port)
         self.driver_manager = None
         self.driver = None
         self._expert_fell_back = False  # 专业检索是否回退到普通搜索
@@ -39,7 +41,8 @@ class CNKICrawler:
     def __enter__(self):
         self.driver_manager = BrowserManager(self.headless, self.download_dir,
                                              browser=self.browser,
-                                             connect_port=self.connect_port)
+                                             connect_port=self.connect_port,
+                                             use_profile=self.use_profile)
         self.driver = self.driver_manager.create_driver()
         return self
 

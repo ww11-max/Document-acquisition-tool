@@ -29,10 +29,11 @@ class EcoAcquireWorkflow:
     """经济学文献题录检索工作流"""
 
     def __init__(self, headless: bool = None, browser: str = None,
-                 connect_port: int = None):
+                 connect_port: int = None, use_profile: bool = True):
         self.headless = headless if headless is not None else settings.USE_HEADLESS
         self.browser = browser
         self.connect_port = connect_port
+        self.use_profile = use_profile and not bool(connect_port)
 
     # ============================================================
     # AI Planning 模式：批量执行结构化检索计划
@@ -103,6 +104,7 @@ class EcoAcquireWorkflow:
                 download_dir=str(settings.OUTPUTS_DIR),
                 browser=self.browser,
                 connect_port=connect_port or self.connect_port,
+                use_profile=self.use_profile,
             ) as crawler:
 
                 for i, paper in enumerate(papers):
@@ -190,6 +192,8 @@ class EcoAcquireWorkflow:
             articles = []
 
             if strategy == "journal_browse" and journal:
+                # journal_browse 策略：尝试从 TARGET_JOURNALS 获取 ISSN
+                # 如果指定期刊不在参考列表中，直接用期刊名搜索（无 ISSN）
                 journal_info = settings.TARGET_JOURNALS.get(journal, {})
                 issn = journal_info.get("issn", "")
                 yr = year or datetime.now().year
@@ -441,6 +445,7 @@ class EcoAcquireWorkflow:
                         download_dir=str(settings.OUTPUTS_DIR),
                         browser=self.browser,
                         connect_port=self.connect_port,
+                        use_profile=self.use_profile,
                     ) as crawler:
                         articles = crawler.batch_extract_metadata(articles, extract_abstract=True)
                         report["articles"] = articles
@@ -473,7 +478,8 @@ class EcoAcquireWorkflow:
             with CNKICrawler(headless=self.headless,
                              download_dir=str(settings.OUTPUTS_DIR),
                              browser=self.browser,
-                             connect_port=self.connect_port) as crawler:
+                             connect_port=self.connect_port,
+                             use_profile=self.use_profile) as crawler:
                 try:
                     articles = self._cnki_search(
                         crawler, keywords, journal, author,
@@ -520,6 +526,7 @@ class EcoAcquireWorkflow:
             )
 
         elif journal and not keywords and not author:
+            # 纯期刊浏览：尝试从参考列表获取 ISSN，没有则直接用期刊名
             journal_info = settings.TARGET_JOURNALS.get(journal, {})
             issn = journal_info.get("issn", "")
             if year_start or year_end:
@@ -571,19 +578,28 @@ class EcoAcquireWorkflow:
     # ============================================================
     def _generate_outputs(self, articles: List[Dict], report_dir: Path,
                            task_label: str):
-        """生成Markdown题录报告和CSV表格"""
+        """生成结构化报告：Markdown + CSV + Excel + JSON"""
         report_dir.mkdir(parents=True, exist_ok=True)
+        safe_label = task_label.replace('/', '_')
 
-        md_path = report_dir / f"{task_label.replace('/', '_')}_results.md"
+        # Markdown
+        md_path = report_dir / f"{safe_label}_results.md"
         md_content = self._build_markdown(articles, task_label)
         md_path.write_text(md_content, encoding="utf-8")
         logger.info(f"Markdown报告: {md_path}")
 
-        csv_path = report_dir / f"{task_label.replace('/', '_')}_results.csv"
+        # CSV
+        csv_path = report_dir / f"{safe_label}_results.csv"
         self._build_csv(articles, csv_path)
         logger.info(f"CSV表格: {csv_path}")
 
-        json_path = report_dir / f"{task_label.replace('/', '_')}_articles.json"
+        # Excel (.xlsx)
+        xlsx_path = report_dir / f"{safe_label}_results.xlsx"
+        self._build_excel(articles, xlsx_path, task_label)
+        logger.info(f"Excel表格: {xlsx_path}")
+
+        # JSON
+        json_path = report_dir / f"{safe_label}_articles.json"
         json_path.write_text(
             json.dumps(articles, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8"
@@ -591,41 +607,44 @@ class EcoAcquireWorkflow:
         logger.info(f"JSON数据: {json_path}")
 
     def _build_markdown(self, articles: List[Dict], title: str) -> str:
-        """构建题录表格 Markdown"""
+        """构建完整题录表格 Markdown（不截断字段）"""
         lines = [f"# {title}\n",
                  f"> 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"]
 
         total = len(articles)
         with_abstract = sum(1 for a in articles if a.get("abstract"))
-        lines.append(f"**总计**: {total} 篇 | **含摘要**: {with_abstract} 篇\n\n")
+        with_doi = sum(1 for a in articles if a.get("doi"))
+        lines.append(f"**总计**: {total} 篇 | **含摘要**: {with_abstract} 篇 | **含DOI**: {with_doi} 篇\n\n")
 
-        # 题录表格
-        lines.append("| # | 标题 | 作者 | 期刊 | 年份 | 关键词 |")
-        lines.append("|---|------|------|------|------|--------|")
+        # 完整题录表格（不截断）
+        lines.append("| # | 标题 | 作者 | 期刊 | 年份 | 关键词 | DOI |")
+        lines.append("|---|------|------|------|------|--------|-----|")
 
         for i, a in enumerate(articles, 1):
+            doi = a.get("doi", "")
+            doi_cell = f"[{doi}](https://doi.org/{doi})" if doi else ""
             lines.append(
-                f"| {i} | {a.get('title', '')[:40]} | {a.get('authors', '')[:15]} "
-                f"| {a.get('journal', '')[:10]} | {a.get('year', '')} "
-                f"| {a.get('keywords', '')[:20]} |"
+                f"| {i} | {a.get('title', '')} | {a.get('authors', '')} "
+                f"| {a.get('journal', '')} | {a.get('year', '')} "
+                f"| {a.get('keywords', '')} | {doi_cell} |"
             )
 
         # 摘要详览
         lines.append("\n## 摘要详览\n")
         for i, a in enumerate(articles, 1):
+            lines.append(f"### {i}. {a.get('title', '未知')}\n")
+            lines.append(f"- **作者**: {a.get('authors', '未知')}")
+            lines.append(f"- **期刊**: {a.get('journal', '未知')} ({a.get('year', '未知')})")
+            if a.get("doi"):
+                lines.append(f"- **DOI**: [{a['doi']}](https://doi.org/{a['doi']})")
+            if a.get("keywords"):
+                lines.append(f"- **关键词**: {a['keywords']}")
+            if a.get("link"):
+                lines.append(f"- **链接**: {a['link']}")
             if a.get("abstract"):
-                lines.append(f"### {i}. {a.get('title', '未知')}\n")
-                lines.append(f"- **作者**: {a.get('authors', '未知')}")
-                lines.append(f"- **期刊**: {a.get('journal', '未知')} ({a.get('year', '未知')})")
-                if a.get("doi"):
-                    lines.append(f"- **DOI**: {a['doi']}")
-                if a.get("keywords"):
-                    lines.append(f"- **关键词**: {a['keywords']}")
-                # 摘要截断到 300 字
-                abstract = a["abstract"][:300]
-                if len(a["abstract"]) > 300:
-                    abstract += "..."
-                lines.append(f"- **摘要**: {abstract}\n")
+                lines.append(f"- **摘要**: {a['abstract']}\n")
+            else:
+                lines.append("")
 
         return "\n".join(lines)
 
@@ -648,6 +667,95 @@ class EcoAcquireWorkflow:
             })
         df = pd.DataFrame(rows)
         df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    def _build_excel(self, articles: List[Dict], xlsx_path: Path, title: str):
+        """生成结构化 Excel 表格（带样式、冻结窗格、自动筛选、合理列宽）"""
+        if not articles:
+            return
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side, numbers
+            from openpyxl.utils import get_column_letter
+        except ImportError:
+            logger.warning("openpyxl 未安装，跳过 Excel 输出。请运行: pip install openpyxl")
+            return
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "题录检索结果"
+
+        # 列定义
+        columns = [
+            ("序号", 6),
+            ("标题", 50),
+            ("作者", 20),
+            ("期刊", 18),
+            ("年份", 8),
+            ("关键词", 30),
+            ("DOI", 28),
+            ("链接", 40),
+            ("摘要", 60),
+            ("搜索来源", 12),
+        ]
+
+        # 样式定义
+        header_font = Font(name="微软雅黑", size=11, bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell_font = Font(name="微软雅黑", size=10)
+        cell_alignment = Alignment(vertical="top", wrap_text=True)
+        thin_border = Border(
+            left=Side(style="thin", color="B4C6E7"),
+            right=Side(style="thin", color="B4C6E7"),
+            top=Side(style="thin", color="B4C6E7"),
+            bottom=Side(style="thin", color="B4C6E7"),
+        )
+        even_fill = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
+
+        # 写表头
+        for col_idx, (col_name, col_width) in enumerate(columns, 1):
+            cell = ws.cell(row=1, column=col_idx, value=col_name)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+            ws.column_dimensions[get_column_letter(col_idx)].width = col_width
+
+        # 写数据行
+        for row_idx, a in enumerate(articles):
+            excel_row = row_idx + 2
+            values = [
+                row_idx + 1,
+                a.get("title", ""),
+                a.get("authors", ""),
+                a.get("journal", ""),
+                a.get("year", ""),
+                a.get("keywords", ""),
+                a.get("doi", ""),
+                a.get("link", ""),
+                a.get("abstract", ""),
+                a.get("source", ""),
+            ]
+            for col_idx, val in enumerate(values, 1):
+                cell = ws.cell(row=excel_row, column=col_idx, value=val)
+                cell.font = cell_font
+                cell.alignment = cell_alignment
+                cell.border = thin_border
+                if row_idx % 2 == 0:
+                    cell.fill = even_fill
+
+        # 冻结首行
+        ws.freeze_panes = "A2"
+
+        # 自动筛选
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{len(articles) + 1}"
+
+        # 行高
+        ws.row_dimensions[1].height = 28
+        for r in range(2, len(articles) + 2):
+            ws.row_dimensions[r].height = 45
+
+        wb.save(xlsx_path)
 
     def _save_report(self, report: Dict, task_dir: Path):
         report_path = task_dir / "task_report.json"
